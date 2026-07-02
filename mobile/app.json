@@ -1,0 +1,43 @@
+{
+  "expo": {
+    "name": "CipherChat",
+    "slug": "cipherchat",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "scheme": "cipherchat",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#0B0F14",
+    "splash": {
+      "backgroundColor": "#0B0F14"
+    },
+    "ios": {
+      "bundleIdentifier": "com.cipherchat.app",
+      "supportsTablet": false,
+      "infoPlist": {
+        "NSFaceIDUsageDescription": "Unlock CipherChat with Face ID.",
+        "NSCameraUsageDescription": "Scan a contact's CipherChat QR code."
+      }
+    },
+    "android": {
+      "package": "com.cipherchat.app",
+      "allowBackup": false,
+      "softwareKeyboardLayoutMode": "resize",
+      "permissions": ["android.permission.CAMERA", "android.permission.USE_BIOMETRIC"]
+    },
+    "notification": {
+      "androidMode": "default"
+    },
+    "plugins": [
+      "expo-secure-store",
+      "expo-local-authentication",
+      [
+        "expo-camera",
+        { "cameraPermission": "Scan a contact's CipherChat QR code." }
+      ],
+      [
+        "expo-notifications",
+        { "defaultChannel": "messages" }
+      ]
+    ]
+  }
+}
