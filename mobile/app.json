@@ -22,7 +22,10 @@
       "package": "com.cipherchat.app",
       "allowBackup": false,
       "softwareKeyboardLayoutMode": "resize",
-      "permissions": ["android.permission.CAMERA", "android.permission.USE_BIOMETRIC"]
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.USE_BIOMETRIC"
+      ]
     },
     "notification": {
       "androidMode": "default"
@@ -32,12 +35,17 @@
       "expo-local-authentication",
       [
         "expo-camera",
-        { "cameraPermission": "Scan a contact's CipherChat QR code." }
+        {
+          "cameraPermission": "Scan a contact's CipherChat QR code."
+        }
       ],
       [
         "expo-notifications",
-        { "defaultChannel": "messages" }
-      ]
+        {
+          "defaultChannel": "messages"
+        }
+      ],
+      "expo-asset"
     ]
   }
 }
