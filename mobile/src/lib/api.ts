@@ -1,5 +1,5 @@
 /**
- * REST client for the CipherChat server (cipherchat/server).
+ * REST client for the CipherChat server (server/).
  *
  * Zero configuration: when the app runs through the Expo dev server, the
  * backend is assumed to be on the same machine, so its address is derived
@@ -59,7 +59,7 @@ async function request<T>(path: string, options: { method?: string; body?: unkno
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
     });
   } catch {
-    throw new ApiError(`Cannot reach the CipherChat server at ${API_URL}. Is it running? (cd cipherchat/server && npm start)`, 0);
+    throw new ApiError(`Cannot reach the CipherChat server at ${API_URL}. Is it running? (cd server && npm start)`, 0);
   }
   const json = (await res.json().catch(() => ({}))) as { error?: string } & T;
   if (!res.ok) throw new ApiError(json.error ?? `Request failed (${res.status})`, res.status);

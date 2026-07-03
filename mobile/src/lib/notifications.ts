@@ -1,6 +1,6 @@
 /**
  * Push notifications intentionally carry zero message content. The server
- * (cipherchat/server/src/push.js) sends only the fixed string
+ * (server/src/push.js) sends only the fixed string
  * "Encrypted message received" — no sender, no preview, no ciphertext.
  */
 import * as Notifications from 'expo-notifications';

@@ -9,10 +9,10 @@ server by itself:
 
 ```sh
 # terminal 1 — backend (auto-creates its database)
-cd cipherchat/server && npm install && npm start
+cd server && npm install && npm start
 
 # terminal 2 — app
-cd cipherchat/mobile && npm install && npx expo start
+cd mobile && npm install && npx expo start
 ```
 
 ```
@@ -82,9 +82,9 @@ cipherchat/
 
 ## Testing walkthrough
 
-1. **Start the server** (`cd cipherchat/server && npm install && npm start`). First start creates
+1. **Start the server** (`cd server && npm install && npm start`). First start creates
    `data/cipherchat.db` and a JWT secret automatically. It prints the LAN URL phones will use.
-2. **Start the app** (`cd cipherchat/mobile && npm install && npx expo start`), then either:
+2. **Start the app** (`cd mobile && npm install && npx expo start`), then either:
    - scan the QR code with the **Expo Go** app on a phone (same Wi-Fi as your computer), or
    - press `i` / `a` for an iOS simulator / Android emulator.
 
@@ -143,13 +143,13 @@ The server ships with a `Dockerfile` and `railway.json`, so deployment is a few 
 
 1. Sign in at [railway.com](https://railway.com) with GitHub → **New Project → Deploy from
    GitHub repo** → pick this repository.
-2. In the service **Settings → Source**, set **Root Directory** to `cipherchat/server`
+2. In the service **Settings → Source**, set **Root Directory** to `server`
    (Railway then finds the Dockerfile automatically).
 3. **Storage/Volumes → Add volume**, mount path `/data` — this is where the SQLite database
    lives so it survives redeploys. (The Dockerfile already sets `CIPHERCHAT_DATA_DIR=/data`.)
 4. **Settings → Networking → Generate Domain** — Railway gives you an HTTPS URL like
    `https://cipherchat-production-xxxx.up.railway.app`.
-5. Point the app at it: create `cipherchat/mobile/.env` containing
+5. Point the app at it: create `mobile/.env` containing
    `EXPO_PUBLIC_API_URL=https://your-domain.up.railway.app`, restart `npx expo start`.
 
 Any other container host (Render, Fly.io, a VPS with Caddy) works the same way: run the
