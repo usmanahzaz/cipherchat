@@ -50,9 +50,10 @@ export function GenerateIdScreen() {
         <Text style={styles.keyGlyph}>⚿</Text>
         <Title>Generate your identity</Title>
         <Subtitle>
-          CipherChat will create an X25519 key pair on this device. The public half becomes your
-          shareable Secure ID. The private half is written to the {`\n`}iOS Keychain / Android
-          Keystore and is never uploaded, backed up, or displayed.
+          CipherChat will create your cryptographic identity on this device: an X25519 identity
+          key, an Ed25519 signing key, and a signed prekey for Double-Ratchet sessions. The
+          public halves become your shareable Secure ID. The private halves are written to the
+          iOS Keychain / Android Keystore and are never uploaded, backed up, or displayed.
         </Subtitle>
         <ErrorText>{error}</ErrorText>
       </View>

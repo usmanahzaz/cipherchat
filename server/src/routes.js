@@ -55,19 +55,24 @@ router.get('/me', requireAuth, (req, res) => {
   res.json({ profile: publicProfile(user) });
 });
 
-// Publishes the PUBLIC half of the on-device key pair + derived Secure ID.
-// The private key never appears in any request.
+// Publishes the PUBLIC key bundle (X25519 identity, Ed25519 signing key,
+// signed prekey + signature) and the derived Secure ID. Private keys never
+// appear in any request.
 router.post('/me/keys', requireAuth, (req, res) => {
-  const { public_key, secure_id } = req.body ?? {};
-  if (typeof public_key !== 'string' || !public_key || typeof secure_id !== 'string' || !secure_id) {
-    return res.status(400).json({ error: 'public_key and secure_id required.' });
+  const { public_key, secure_id, sign_public_key, signed_prekey, prekey_signature } =
+    req.body ?? {};
+  const fields = { public_key, secure_id, sign_public_key, signed_prekey, prekey_signature };
+  for (const [name, value] of Object.entries(fields)) {
+    if (typeof value !== 'string' || !value) {
+      return res.status(400).json({ error: `${name} required.` });
+    }
   }
   try {
-    db.prepare('UPDATE users SET public_key = ?, secure_id = ? WHERE id = ?').run(
-      public_key,
-      secure_id,
-      req.userId,
-    );
+    db.prepare(
+      `UPDATE users SET public_key = ?, secure_id = ?, sign_public_key = ?,
+                        signed_prekey = ?, prekey_signature = ?
+       WHERE id = ?`,
+    ).run(public_key, secure_id, sign_public_key, signed_prekey, prekey_signature, req.userId);
   } catch (e) {
     if (String(e).includes('UNIQUE')) {
       return res.status(409).json({ error: 'That Secure ID is already registered.' });
@@ -110,7 +115,9 @@ router.get('/contacts', requireAuth, (req, res) => {
   const rows = db
     .prepare(
       `SELECT c.id, c.owner_id, c.contact_id, c.alias,
-              u.id AS p_id, u.email AS p_email, u.secure_id AS p_secure_id, u.public_key AS p_public_key
+              u.id AS p_id, u.email AS p_email, u.secure_id AS p_secure_id,
+              u.public_key AS p_public_key, u.sign_public_key AS p_sign_public_key,
+              u.signed_prekey AS p_signed_prekey, u.prekey_signature AS p_prekey_signature
        FROM contacts c JOIN users u ON u.id = c.contact_id
        WHERE c.owner_id = ?
        ORDER BY c.created_at ASC`,
@@ -122,7 +129,15 @@ router.get('/contacts', requireAuth, (req, res) => {
       owner_id: r.owner_id,
       contact_id: r.contact_id,
       alias: r.alias,
-      profile: { id: r.p_id, email: r.p_email, secure_id: r.p_secure_id, public_key: r.p_public_key },
+      profile: {
+        id: r.p_id,
+        email: r.p_email,
+        secure_id: r.p_secure_id,
+        public_key: r.p_public_key,
+        sign_public_key: r.p_sign_public_key,
+        signed_prekey: r.p_signed_prekey,
+        prekey_signature: r.p_prekey_signature,
+      },
     })),
   });
 });

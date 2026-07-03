@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
-import { decryptMessage } from '../lib/crypto';
-import type { Message } from '../lib/types';
+import { decryptFrom } from '../lib/sessions';
+import { vault } from '../lib/vault';
+import type { Message, PeerProfile } from '../lib/types';
 import { colors, spacing, type } from '../theme';
 
 const VISIBLE_SECONDS = 10;
@@ -9,8 +10,7 @@ const VISIBLE_SECONDS = 10;
 interface Props {
   message: Message;
   mine: boolean;
-  peerPublicKey: string;
-  mySecretKey: string;
+  peer: PeerProfile;
   autoDecode: boolean;
   /** Called when a one-time message finishes its single reveal. */
   onBurn: (message: Message) => void;
@@ -19,25 +19,23 @@ interface Props {
 /**
  * Renders ciphertext by default. "Decode" decrypts locally; the plaintext
  * lives only in this component's state and is destroyed after 10 seconds,
- * reverting the bubble to its encrypted display. One-time messages are
- * deleted (server + local) after their single reveal.
+ * reverting the bubble to its encrypted display.
+ *
+ * Transport decryption (Double Ratchet) consumes the message key forever, so
+ * first decode stores the plaintext in the device's encrypted vault for
+ * later re-display — EXCEPT one-time messages, which are never vaulted: after
+ * their single reveal no key exists anywhere that can show them again.
  *
  * Plaintext is rendered with selectable={false} so it cannot be selected or
  * copied through the standard text-selection UI.
  */
-export function MessageBubble({
-  message,
-  mine,
-  peerPublicKey,
-  mySecretKey,
-  autoDecode,
-  onBurn,
-}: Props) {
+export function MessageBubble({ message, mine, peer, autoDecode, onBurn }: Props) {
   const [plaintext, setPlaintext] = useState<string | null>(null);
   const [secondsLeft, setSecondsLeft] = useState(0);
   const [failed, setFailed] = useState(false);
   const [burned, setBurned] = useState(false);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const decodingRef = useRef(false);
   const revealedOnceRef = useRef(false);
 
   const clearTimer = () => {
@@ -57,21 +55,28 @@ export function MessageBubble({
     }
   }, [message, mine, onBurn]);
 
-  const decode = useCallback(() => {
-    if (plaintext !== null || burned) return;
-    const text = decryptMessage(
-      { ciphertext: message.ciphertext, nonce: message.nonce },
-      peerPublicKey,
-      mySecretKey,
-    );
-    if (text === null) {
-      setFailed(true);
-      return;
+  const decode = useCallback(async () => {
+    if (plaintext !== null || burned || decodingRef.current) return;
+    decodingRef.current = true;
+    try {
+      // 1. Already decoded once → encrypted local vault.
+      let text = await vault.getMessage(message.id);
+      // 2. First decode of an incoming message → ratchet (consumes the key).
+      if (text === null && !mine) {
+        text = await decryptFrom(peer.id, peer.public_key, message.ciphertext);
+        if (text !== null && !message.one_time) await vault.putMessage(message.id, text);
+      }
+      if (text === null) {
+        setFailed(true);
+        return;
+      }
+      revealedOnceRef.current = true;
+      setPlaintext(text);
+      setSecondsLeft(VISIBLE_SECONDS);
+    } finally {
+      decodingRef.current = false;
     }
-    revealedOnceRef.current = true;
-    setPlaintext(text);
-    setSecondsLeft(VISIBLE_SECONDS);
-  }, [plaintext, burned, message, peerPublicKey, mySecretKey]);
+  }, [plaintext, burned, mine, message, peer]);
 
   // Countdown: reveal for exactly VISIBLE_SECONDS, then wipe from state.
   useEffect(() => {
@@ -124,7 +129,9 @@ export function MessageBubble({
             <View style={styles.metaRow}>
               {message.one_time && <Text style={styles.oneTime}>🔥 one-time</Text>}
               {failed ? (
-                <Text style={styles.failedText}>decryption failed</Text>
+                <Text style={styles.failedText}>
+                  {mine ? 'not stored on this device' : 'undecryptable (key consumed or invalid)'}
+                </Text>
               ) : (
                 <Pressable onPress={decode} hitSlop={8}>
                   <Text style={styles.decodeBtn}>⟨ DECODE ⟩</Text>
@@ -145,9 +152,9 @@ export function MessageBubble({
   );
 }
 
-/** Groups base64 ciphertext into hex-like blocks so it reads as "code". */
+/** Groups the envelope's ciphertext into blocks so it reads as "code". */
 function formatCipher(ciphertext: string): string {
-  const body = ciphertext.replace(/[^A-Za-z0-9]/g, '').slice(0, 96);
+  const body = ciphertext.replace(/[^A-Za-z0-9]/g, '').slice(-96);
   return body.match(/.{1,4}/g)?.join(' ') ?? body;
 }
 

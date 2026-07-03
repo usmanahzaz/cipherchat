@@ -20,7 +20,7 @@ export function ChatScreen({ route, navigation }: Props) {
 
   const { contact } = route.params;
   const peer = contact.profile;
-  const { userId, keyPair } = useAuth();
+  const { userId, hasKeys } = useAuth();
   const autoDecode = useSettings((s) => s.autoDecode);
   const { threads, loadThread, sendMessage, burnMessage, markDelivered } = useMessages();
   const [draft, setDraft] = useState('');
@@ -49,7 +49,7 @@ export function ChatScreen({ route, navigation }: Props) {
     if (!err) setOneTime(false);
   }, [draft, peer, oneTime, sendMessage]);
 
-  if (!userId || !keyPair) return null;
+  if (!userId || !hasKeys) return null;
 
   return (
     <Screen pad={false}>
@@ -74,8 +74,7 @@ export function ChatScreen({ route, navigation }: Props) {
           <MessageBubble
             message={item}
             mine={item.sender_id === userId}
-            peerPublicKey={peer.public_key}
-            mySecretKey={keyPair.secretKey}
+            peer={peer}
             autoDecode={autoDecode}
             onBurn={burnMessage}
           />

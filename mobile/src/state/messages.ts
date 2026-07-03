@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { api, errorMessage, wsUrl, type RealtimeEvent } from '../lib/api';
-import { encryptMessage } from '../lib/crypto';
+import { encryptFor } from '../lib/sessions';
+import { vault } from '../lib/vault';
 import type { Contact, Message, PeerProfile } from '../lib/types';
 import { useAuth } from './auth';
 
@@ -73,12 +74,13 @@ export const useMessages = create<MessagesState>((set, get) => ({
   },
 
   sendMessage: async (peer, text, oneTime) => {
-    const { keyPair } = useAuth.getState();
-    if (!keyPair) return 'Missing keys.';
     try {
-      // Encrypt on-device before anything touches the network.
-      const payload = encryptMessage(text, peer.public_key, keyPair.secretKey);
-      const { message } = await api.send(peer.id, payload.ciphertext, payload.nonce, oneTime);
+      // Ratchet-encrypt on-device before anything touches the network. The
+      // one-time transport key is consumed here, so the sender's own copy is
+      // kept in the encrypted local vault for re-display.
+      const envelope = await encryptFor(peer, text);
+      const { message } = await api.send(peer.id, envelope, 'v2', oneTime);
+      if (!oneTime) await vault.putMessage(message.id, text);
       set((s) => ({
         threads: { ...s.threads, [peer.id]: upsertMessage(s.threads[peer.id] ?? [], message) },
       }));
@@ -91,6 +93,7 @@ export const useMessages = create<MessagesState>((set, get) => ({
   burnMessage: async (message) => {
     const me = useAuth.getState().userId;
     const peerId = message.sender_id === me ? message.recipient_id : message.sender_id;
+    await vault.deleteMessage(message.id);
     try {
       await api.deleteMessage(message.id);
     } catch {
@@ -158,6 +161,7 @@ function connect(
       }));
     } else if (event.type === 'message:deleted') {
       const deletedId = event.id;
+      vault.deleteMessage(deletedId); // peer burned it → drop our vaulted copy too
       set((s) => ({
         threads: Object.fromEntries(
           Object.entries(s.threads).map(([k, v]) => [k, v.filter((m) => m.id !== deletedId)]),

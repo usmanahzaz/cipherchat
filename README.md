@@ -39,7 +39,8 @@ availability, and nothing for you to provision.
 | Layer | Choice | Why |
 |---|---|---|
 | Mobile | Expo (React Native, TypeScript) | One codebase, native iOS + Android |
-| Crypto | [TweetNaCl.js](https://github.com/dchest/tweetnacl-js) (audited by Cure53) | X25519 key agreement + XSalsa20-Poly1305 AEAD via `nacl.box` — proven primitives, zero custom crypto |
+| Protocol | **Double Ratchet + X3DH** (Signal's published algorithm) | Forward secrecy: every message uses a one-time key destroyed after use. Post-compromise security: conversations self-heal after a key theft |
+| Primitives | [TweetNaCl.js](https://github.com/dchest/tweetnacl-js) + [@noble/hashes](https://github.com/paulmillr/noble-hashes) (both Cure53-audited) | X25519, Ed25519, XSalsa20-Poly1305, HKDF/HMAC-SHA-512 — proven implementations, zero custom primitives |
 | Key storage | `expo-secure-store` | iOS Keychain / Android Keystore |
 | Backend | Node.js (Express) + embedded SQLite (`better-sqlite3`) | Self-contained: auto-creates its DB and JWT secret; REST + WebSocket realtime |
 | Push | Expo Push API (server-side) | Content-free: body is always `"Encrypted message received"` |
@@ -52,7 +53,10 @@ cipherchat/
 │   ├── App.tsx                  # root: app lock gate, realtime, push registration
 │   └── src/
 │       ├── lib/
-│       │   ├── crypto.ts        # keygen, encrypt/decrypt, Secure ID derivation, PIN hashing
+│       │   ├── ratchet.ts       # Double Ratchet + X3DH (forward secrecy, self-healing)
+│       │   ├── sessions.ts      # per-peer session management + persistence
+│       │   ├── vault.ts         # encrypted-at-rest local store (decoded msgs, sessions)
+│       │   ├── crypto.ts        # Secure ID derivation, PIN hashing
 │       │   ├── keystore.ts      # Keychain/Keystore wrapper + panic wipe
 │       │   ├── api.ts           # REST client (auto-discovers the dev server)
 │       │   ├── types.ts         # Profile / Contact / Message shapes
@@ -111,15 +115,20 @@ key) — no browsing or enumeration.
 
 1. **Sign up / log in** with email + password (scrypt-hashed server-side, 30-day JWT session
    stored in the device's secure storage).
-2. **Key generation (on device)**: `nacl.box.keyPair()` → X25519 key pair.
-   - Private key → `expo-secure-store` (iOS Keychain / Android Keystore,
-     `WHEN_UNLOCKED_THIS_DEVICE_ONLY`). It is never transmitted, displayed, or backed up.
-   - Public key → published to the server, shareable freely.
-3. **Secure ID** = base32 of SHA-512(public key), formatted `CC-XXXX-XXXX-XXXX-XXXX` —
-   a human-shareable handle derived from, and bound to, the key.
-4. **Send**: `nacl.box(plaintext, nonce, recipientPublicKey, senderPrivateKey)` on-device;
-   only `{ciphertext, nonce}` goes to the server, which relays it live over WebSocket.
-5. **Decode**: `nacl.box.open(...)` on-device; plaintext lives in component state for ≤ 10 s.
+2. **Identity generation (on device)**: an X25519 identity key, an Ed25519 signing key, and a
+   signed prekey (`ratchet.ts`). All private halves go to `expo-secure-store`
+   (`WHEN_UNLOCKED_THIS_DEVICE_ONLY`) and are never transmitted, displayed, or backed up. Only
+   the public bundle is published.
+3. **Secure ID** = base32 of SHA-512(identity public key), formatted `CC-XXXX-XXXX-XXXX-XXXX`.
+4. **Session setup (X3DH)**: the sender fetches the recipient's bundle, verifies the prekey
+   signature, and derives a shared root key from three Diffie-Hellman exchanges.
+5. **Send (Double Ratchet)**: each message is encrypted under a fresh one-time key from an
+   advancing HMAC chain; the key is destroyed immediately after use. Fresh X25519 randomness
+   is mixed in every round-trip, so stolen state locks itself out ("self-healing").
+6. **Decode**: first decode consumes the transport key; the plaintext is shown for ≤ 10 s and
+   kept only in the device's **encrypted local vault** (XSalsa20-Poly1305, key in Keychain/
+   Keystore) so Decode works again later. One-time messages are never vaulted — after their
+   single reveal, no key exists anywhere that can display them again.
 
 ## Push notifications & native features
 
@@ -128,12 +137,24 @@ those, build a dev client: `npx expo run:android` / `npx expo run:ios`. Push wor
 box once the app registers its Expo push token — the server sends the fixed text
 `"Encrypted message received"` whenever the recipient isn't connected live.
 
-## Deploying beyond your laptop
+## Deploying beyond your laptop (Railway)
 
-The server is a single Node process — run it on any VPS/container host, put HTTPS in front of it
-(Caddy/nginx/a platform that terminates TLS), and set `EXPO_PUBLIC_API_URL` in `mobile/.env`.
-The SQLite file in `server/data/` is the entire persistent state; back it up by copying it.
-**Use HTTPS for anything beyond local testing** — see SECURITY.md.
+The server ships with a `Dockerfile` and `railway.json`, so deployment is a few clicks:
+
+1. Sign in at [railway.com](https://railway.com) with GitHub → **New Project → Deploy from
+   GitHub repo** → pick this repository.
+2. In the service **Settings → Source**, set **Root Directory** to `cipherchat/server`
+   (Railway then finds the Dockerfile automatically).
+3. **Storage/Volumes → Add volume**, mount path `/data` — this is where the SQLite database
+   lives so it survives redeploys. (The Dockerfile already sets `CIPHERCHAT_DATA_DIR=/data`.)
+4. **Settings → Networking → Generate Domain** — Railway gives you an HTTPS URL like
+   `https://cipherchat-production-xxxx.up.railway.app`.
+5. Point the app at it: create `cipherchat/mobile/.env` containing
+   `EXPO_PUBLIC_API_URL=https://your-domain.up.railway.app`, restart `npx expo start`.
+
+Any other container host (Render, Fly.io, a VPS with Caddy) works the same way: run the
+Dockerfile, persist `/data`, terminate TLS. The SQLite file is the entire server state — back it
+up by copying it. **HTTPS is mandatory beyond local testing** — see SECURITY.md.
 
 ## Extending (the architecture is ready for it)
 
@@ -141,8 +162,11 @@ The SQLite file in `server/data/` is the entire persistent state; back it up by 
   (`nacl.secretbox`), wrap that key with `nacl.box` per recipient, store the blob server-side.
   The message row gains a `media_url` + wrapped key — the server still sees only noise.
 - **Disappearing media**: reuse the one-time-burn path (`burnMessage`) with a TTL column.
-- **Forward secrecy / groups**: swap the static `nacl.box` layer for a Signal-style double
-  ratchet (e.g. libsignal) behind the same `crypto.ts` interface. See SECURITY.md.
+- **Groups / multi-device**: the per-peer session layer in `sessions.ts` is the extension
+  point (sender-keys for groups; per-device sessions for multi-device).
+- **Independent audit / libsignal**: the ratchet follows Signal's published spec on audited
+  primitives, but it is our implementation — swap in libsignal via a native bridge or
+  commission an audit before high-stakes use. See SECURITY.md.
 - **Scale**: if one machine ever isn't enough, the storage layer in `db.js` is ~60 lines of SQL —
   porting it to Postgres is mechanical, and nothing else changes.
 

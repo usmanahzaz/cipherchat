@@ -11,7 +11,10 @@ import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const DATA_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'data');
+// Override with CIPHERCHAT_DATA_DIR to point at a mounted volume (e.g. /data
+// on Railway/Fly) so the database survives redeploys.
+export const DATA_DIR =
+  process.env.CIPHERCHAT_DATA_DIR ?? join(dirname(fileURLToPath(import.meta.url)), '..', 'data');
 mkdirSync(DATA_DIR, { recursive: true });
 
 export const db = new Database(join(DATA_DIR, 'cipherchat.db'));
@@ -24,7 +27,10 @@ db.exec(`
     email         TEXT NOT NULL UNIQUE COLLATE NOCASE,
     password_hash TEXT NOT NULL,
     secure_id     TEXT UNIQUE,            -- CC-XXXX-…, derived on-device from public_key
-    public_key    TEXT,                   -- base64 X25519 public key (safe to share)
+    public_key    TEXT,                   -- base64 X25519 identity key (safe to share)
+    sign_public_key   TEXT,               -- base64 Ed25519 signing key
+    signed_prekey     TEXT,               -- base64 X25519 signed prekey (X3DH)
+    prekey_signature  TEXT,               -- Ed25519 signature over signed_prekey
     push_token    TEXT,                   -- Expo push token; notifications carry no content
     created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
   );
@@ -56,6 +62,14 @@ db.exec(`
     ON messages (recipient_id, created_at);
 `);
 
+// Dev-friendly migration for databases created before the prekey columns.
+for (const col of ['sign_public_key', 'signed_prekey', 'prekey_signature']) {
+  const exists = db
+    .prepare(`SELECT 1 FROM pragma_table_info('users') WHERE name = ?`)
+    .get(col);
+  if (!exists) db.exec(`ALTER TABLE users ADD COLUMN ${col} TEXT`);
+}
+
 /** Public profile shape sent to clients — never includes password/push token. */
 export function publicProfile(row) {
   if (!row) return null;
@@ -64,6 +78,9 @@ export function publicProfile(row) {
     email: row.email,
     secure_id: row.secure_id,
     public_key: row.public_key,
+    sign_public_key: row.sign_public_key,
+    signed_prekey: row.signed_prekey,
+    prekey_signature: row.prekey_signature,
   };
 }
 

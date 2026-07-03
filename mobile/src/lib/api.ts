@@ -81,8 +81,13 @@ export const api = {
 
   me: () => request<{ profile: Profile }>('/me'),
 
-  publishKeys: (public_key: string, secure_id: string) =>
-    request<{ profile: Profile }>('/me/keys', { method: 'POST', body: { public_key, secure_id } }),
+  publishKeys: (bundle: {
+    public_key: string;
+    secure_id: string;
+    sign_public_key: string;
+    signed_prekey: string;
+    prekey_signature: string;
+  }) => request<{ profile: Profile }>('/me/keys', { method: 'POST', body: bundle }),
 
   setPushToken: (token: string | null) =>
     request<{ ok: true }>('/me/push-token', { method: 'POST', body: { token } }),
