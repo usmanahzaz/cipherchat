@@ -1,12 +1,12 @@
 /**
- * Push notifications intentionally carry zero message content. The Edge
- * Function (supabase/functions/notify-message) sends only the fixed string
+ * Push notifications intentionally carry zero message content. The server
+ * (cipherchat/server/src/push.js) sends only the fixed string
  * "Encrypted message received" — no sender, no preview, no ciphertext.
  */
 import * as Notifications from 'expo-notifications';
 import * as Device from 'expo-device';
 import { Platform } from 'react-native';
-import { supabase } from './supabase';
+import { api } from './api';
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -16,7 +16,7 @@ Notifications.setNotificationHandler({
   }),
 });
 
-export async function registerPushToken(userId: string): Promise<void> {
+export async function registerPushToken(): Promise<void> {
   try {
     if (!Device.isDevice) return; // emulators cannot receive push
     const { status } = await Notifications.requestPermissionsAsync();
@@ -32,7 +32,7 @@ export async function registerPushToken(userId: string): Promise<void> {
     }
 
     const token = (await Notifications.getExpoPushTokenAsync()).data;
-    await supabase.from('profiles').update({ push_token: token }).eq('id', userId);
+    await api.setPushToken(token);
   } catch {
     // Push is best-effort; messaging works without it.
   }

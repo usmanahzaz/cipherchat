@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { decryptMessage } from '../lib/crypto';
-import type { Message } from '../lib/supabase';
+import type { Message } from '../lib/types';
 import { colors, spacing, type } from '../theme';
 
 const VISIBLE_SECONDS = 10;

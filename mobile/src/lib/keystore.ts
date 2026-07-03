@@ -13,6 +13,7 @@ const K = {
   pinHash: 'cc.pinHash',
   pinSalt: 'cc.pinSalt',
   panicHash: 'cc.panicHash',
+  session: 'cc.session',
 } as const;
 
 const OPTS: SecureStore.SecureStoreOptions = {
@@ -30,6 +31,18 @@ export async function getKeyPair(): Promise<KeyPairB64 | null> {
     SecureStore.getItemAsync(K.publicKey, OPTS),
   ]);
   return secretKey && publicKey ? { secretKey, publicKey } : null;
+}
+
+export async function saveSessionToken(token: string): Promise<void> {
+  await SecureStore.setItemAsync(K.session, token, OPTS);
+}
+
+export async function getSessionToken(): Promise<string | null> {
+  return SecureStore.getItemAsync(K.session, OPTS);
+}
+
+export async function clearSessionToken(): Promise<void> {
+  await SecureStore.deleteItemAsync(K.session, OPTS);
 }
 
 export async function savePin(hash: string, salt: string): Promise<void> {

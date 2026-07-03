@@ -4,7 +4,7 @@ import { usePreventScreenCapture } from 'expo-screen-capture';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { MessageBubble } from '../components/MessageBubble';
 import { Input, Screen } from '../components/ui';
-import type { Message } from '../lib/supabase';
+import type { Message } from '../lib/types';
 import { useAuth } from '../state/auth';
 import { useMessages } from '../state/messages';
 import { useSettings } from '../state/settings';

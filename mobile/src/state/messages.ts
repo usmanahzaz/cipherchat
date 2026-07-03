@@ -1,7 +1,7 @@
 import { create } from 'zustand';
-import type { RealtimeChannel } from '@supabase/supabase-js';
+import { api, errorMessage, wsUrl, type RealtimeEvent } from '../lib/api';
 import { encryptMessage } from '../lib/crypto';
-import { supabase, type Contact, type Message, type Profile } from '../lib/supabase';
+import type { Contact, Message, PeerProfile } from '../lib/types';
 import { useAuth } from './auth';
 
 /**
@@ -11,14 +11,14 @@ import { useAuth } from './auth';
  */
 interface MessagesState {
   contacts: Contact[];
-  /** contactId (peer user id) -> encrypted messages, oldest first */
+  /** peer user id -> encrypted messages, oldest first */
   threads: Record<string, Message[]>;
-  channel: RealtimeChannel | null;
+  socket: WebSocket | null;
 
   loadContacts: () => Promise<void>;
   addContact: (identifier: string, alias?: string) => Promise<string | null>;
   loadThread: (peerId: string) => Promise<void>;
-  sendMessage: (peer: Profile, text: string, oneTime: boolean) => Promise<string | null>;
+  sendMessage: (peer: PeerProfile, text: string, oneTime: boolean) => Promise<string | null>;
   burnMessage: (message: Message) => Promise<void>;
   markDelivered: (peerId: string) => Promise<void>;
   subscribe: () => void;
@@ -31,81 +31,71 @@ function upsertMessage(list: Message[], msg: Message): Message[] {
   return [...without, msg].sort((a, b) => a.created_at.localeCompare(b.created_at));
 }
 
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let wantSocket = false;
+
 export const useMessages = create<MessagesState>((set, get) => ({
   contacts: [],
   threads: {},
-  channel: null,
+  socket: null,
 
   loadContacts: async () => {
-    const { data } = await supabase
-      .from('contacts')
-      .select('id, owner_id, contact_id, alias, profile:profiles!contacts_contact_id_fkey(id, email, secure_id, public_key)')
-      .order('created_at', { ascending: true });
-    if (data) set({ contacts: data as unknown as Contact[] });
+    try {
+      const { contacts } = await api.contacts();
+      set({ contacts });
+    } catch {
+      // keep whatever we had; screens surface errors on user actions
+    }
   },
 
   addContact: async (identifier, alias) => {
     const me = useAuth.getState();
     if (!me.userId) return 'Not signed in.';
-    // lookup_profile is a SECURITY DEFINER RPC that only returns a row on an
-    // exact Secure ID / email / public key match — no browsing or fuzzy search.
-    const { data, error } = await supabase.rpc('lookup_profile', {
-      identifier: identifier.trim(),
-    });
-    if (error) return error.message;
-    const found = (data as Profile[] | null)?.[0];
-    if (!found) return 'No user found for that Secure ID, email, or public key.';
-    if (found.id === me.userId) return 'That is your own ID.';
-
-    const { error: insErr } = await supabase.from('contacts').upsert(
-      { owner_id: me.userId, contact_id: found.id, alias: alias || null },
-      { onConflict: 'owner_id,contact_id' },
-    );
-    if (insErr) return insErr.message;
-    await get().loadContacts();
-    return null;
+    try {
+      // Exact-match lookup only (Secure ID / email / public key) — no browsing.
+      const { profile } = await api.lookup(identifier.trim());
+      if (profile.id === me.userId) return 'That is your own ID.';
+      await api.addContact(profile.id, alias);
+      await get().loadContacts();
+      return null;
+    } catch (e) {
+      return errorMessage(e);
+    }
   },
 
   loadThread: async (peerId) => {
-    const me = useAuth.getState().userId;
-    if (!me) return;
-    const { data } = await supabase
-      .from('messages')
-      .select('*')
-      .or(
-        `and(sender_id.eq.${me},recipient_id.eq.${peerId}),and(sender_id.eq.${peerId},recipient_id.eq.${me})`,
-      )
-      .order('created_at', { ascending: true });
-    if (data) set((s) => ({ threads: { ...s.threads, [peerId]: data as Message[] } }));
+    try {
+      const { messages } = await api.thread(peerId);
+      set((s) => ({ threads: { ...s.threads, [peerId]: messages } }));
+    } catch {
+      // transient; realtime + next focus will refresh
+    }
   },
 
   sendMessage: async (peer, text, oneTime) => {
-    const { userId, keyPair } = useAuth.getState();
-    if (!userId || !keyPair) return 'Missing keys.';
-    // Encrypt on-device before anything touches the network.
-    const payload = encryptMessage(text, peer.public_key, keyPair.secretKey);
-    const { data, error } = await supabase
-      .from('messages')
-      .insert({
-        sender_id: userId,
-        recipient_id: peer.id,
-        ciphertext: payload.ciphertext,
-        nonce: payload.nonce,
-        one_time: oneTime,
-      })
-      .select('*')
-      .single();
-    if (error) return error.message;
-    set((s) => ({
-      threads: { ...s.threads, [peer.id]: upsertMessage(s.threads[peer.id] ?? [], data as Message) },
-    }));
-    return null;
+    const { keyPair } = useAuth.getState();
+    if (!keyPair) return 'Missing keys.';
+    try {
+      // Encrypt on-device before anything touches the network.
+      const payload = encryptMessage(text, peer.public_key, keyPair.secretKey);
+      const { message } = await api.send(peer.id, payload.ciphertext, payload.nonce, oneTime);
+      set((s) => ({
+        threads: { ...s.threads, [peer.id]: upsertMessage(s.threads[peer.id] ?? [], message) },
+      }));
+      return null;
+    } catch (e) {
+      return errorMessage(e);
+    }
   },
 
   burnMessage: async (message) => {
     const me = useAuth.getState().userId;
     const peerId = message.sender_id === me ? message.recipient_id : message.sender_id;
-    await supabase.from('messages').delete().eq('id', message.id);
+    try {
+      await api.deleteMessage(message.id);
+    } catch {
+      // still remove locally; server delete retried implicitly on next burn
+    }
     set((s) => ({
       threads: {
         ...s.threads,
@@ -115,56 +105,24 @@ export const useMessages = create<MessagesState>((set, get) => ({
   },
 
   markDelivered: async (peerId) => {
-    const me = useAuth.getState().userId;
-    if (!me) return;
-    await supabase
-      .from('messages')
-      .update({ delivered_at: new Date().toISOString() })
-      .eq('sender_id', peerId)
-      .eq('recipient_id', me)
-      .is('delivered_at', null);
+    try {
+      await api.markDelivered(peerId);
+    } catch {
+      // best-effort
+    }
   },
 
   subscribe: () => {
-    const me = useAuth.getState().userId;
-    if (!me || get().channel) return;
-    const channel = supabase
-      .channel('messages-inbox')
-      .on(
-        'postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'messages', filter: `recipient_id=eq.${me}` },
-        (payload) => {
-          const msg = payload.new as Message;
-          set((s) => ({
-            threads: {
-              ...s.threads,
-              [msg.sender_id]: upsertMessage(s.threads[msg.sender_id] ?? [], msg),
-            },
-          }));
-        },
-      )
-      .on(
-        'postgres_changes',
-        { event: 'DELETE', schema: 'public', table: 'messages' },
-        (payload) => {
-          const gone = payload.old as Partial<Message>;
-          if (!gone.id) return;
-          set((s) => {
-            const threads = Object.fromEntries(
-              Object.entries(s.threads).map(([k, v]) => [k, v.filter((m) => m.id !== gone.id)]),
-            );
-            return { threads };
-          });
-        },
-      )
-      .subscribe();
-    set({ channel });
+    wantSocket = true;
+    connect(set, get);
   },
 
   unsubscribe: () => {
-    const { channel } = get();
-    if (channel) supabase.removeChannel(channel);
-    set({ channel: null });
+    wantSocket = false;
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+    get().socket?.close();
+    set({ socket: null });
   },
 
   reset: () => {
@@ -172,3 +130,62 @@ export const useMessages = create<MessagesState>((set, get) => ({
     set({ contacts: [], threads: {} });
   },
 }));
+
+function connect(
+  set: (fn: (s: MessagesState) => Partial<MessagesState>) => void,
+  get: () => MessagesState,
+) {
+  if (!wantSocket || get().socket) return;
+  const url = wsUrl();
+  if (!url) return;
+
+  const socket = new WebSocket(url);
+
+  socket.onmessage = (evt) => {
+    let event: RealtimeEvent;
+    try {
+      event = JSON.parse(String(evt.data));
+    } catch {
+      return;
+    }
+    if (event.type === 'message:new') {
+      const msg = event.message;
+      set((s) => ({
+        threads: {
+          ...s.threads,
+          [msg.sender_id]: upsertMessage(s.threads[msg.sender_id] ?? [], msg),
+        },
+      }));
+    } else if (event.type === 'message:deleted') {
+      const deletedId = event.id;
+      set((s) => ({
+        threads: Object.fromEntries(
+          Object.entries(s.threads).map(([k, v]) => [k, v.filter((m) => m.id !== deletedId)]),
+        ),
+      }));
+    } else if (event.type === 'messages:delivered') {
+      const { peer_id: peerId, delivered_at: deliveredAt } = event;
+      set((s) => ({
+        threads: {
+          ...s.threads,
+          [peerId]: (s.threads[peerId] ?? []).map((m) =>
+            m.recipient_id === peerId && !m.delivered_at ? { ...m, delivered_at: deliveredAt } : m,
+          ),
+        },
+      }));
+    }
+  };
+
+  socket.onclose = () => {
+    set(() => ({ socket: null }));
+    if (wantSocket && !reconnectTimer) {
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        connect(set, get);
+      }, 2000);
+    }
+  };
+  socket.onerror = () => socket.close();
+
+  set(() => ({ socket }));
+}

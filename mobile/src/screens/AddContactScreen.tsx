@@ -62,7 +62,7 @@ export function AddContactScreen({ navigation }: Props) {
         <Button label="Add contact" onPress={() => submit()} loading={busy} />
         <Button label="Scan QR code" variant="ghost" onPress={openScanner} />
 
-        {profile && (
+        {profile?.secure_id && (
           <View style={styles.myCard}>
             <Text style={styles.myCardLabel}>YOUR QR — let others scan it</Text>
             <View style={styles.qrWrap}>

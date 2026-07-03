@@ -21,8 +21,10 @@ decrypt rather than yielding garbage.
 ## What the server can and cannot see
 
 **Cannot see, ever:** message content. The server stores `{ciphertext, nonce}` produced
-on-device. There is no key escrow, no backup of private keys, and Row Level Security plus a
-column-guard trigger prevent even authenticated users from touching ciphertext they don't own.
+on-device in an embedded SQLite database. There is no key escrow, no backup of private keys,
+and every API endpoint checks ownership so authenticated users can only ever fetch or delete
+messages they are an endpoint of. Passwords are stored as scrypt hashes; sessions are JWTs
+signed with a secret generated on first start.
 
 **Can see (metadata):** who talks to whom, when, how often, message sizes, delivery/read
 timestamps, emails, public keys, and push tokens. **E2EE hides content, not traffic patterns.**
@@ -73,11 +75,15 @@ Hiding metadata requires onion routing / sealed sender designs that are out of s
    recipient's device necessarily holds the ciphertext and the key to read it again (except for
    one-time messages, which are destroyed).
 8. **Metadata is visible to the operator** (see above).
-9. **No rate limiting / abuse controls** on the lookup RPC beyond exact-match semantics; a
+9. **No rate limiting / abuse controls** on the lookup endpoint beyond exact-match semantics; a
    production deployment should add rate limits and enumeration monitoring.
 10. **Panic wipe's server-side cleanup is best-effort** — offline it still destroys local keys
     (which is what makes data unreadable), but blobs may remain on the server until connectivity
     allows deletion.
+11. **Local testing runs over plain HTTP on your LAN.** The message bodies crossing it are
+    already end-to-end encrypted, but session tokens and metadata are not — fine on a trusted
+    home network, not fine on the internet. **Any deployment beyond your own machine must sit
+    behind HTTPS** (and the JWT secret file `server/data/jwt-secret` must be kept private).
 
 ## Responsible use
 

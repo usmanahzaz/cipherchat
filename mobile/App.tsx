@@ -1,5 +1,4 @@
 import 'react-native-get-random-values';
-import 'react-native-url-polyfill/auto';
 import React, { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, AppState, StyleSheet, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
@@ -42,7 +41,7 @@ export default function App() {
     if (userId && !needsKeySetup) {
       loadContacts();
       subscribe();
-      registerPushToken(userId);
+      registerPushToken();
       return unsubscribe;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps

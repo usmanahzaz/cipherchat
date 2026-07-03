@@ -1,7 +1,7 @@
 import React from 'react';
 import { DarkTheme, NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import type { Contact } from '../lib/supabase';
+import type { Contact } from '../lib/types';
 import { AddContactScreen } from '../screens/AddContactScreen';
 import { AuthScreen } from '../screens/AuthScreen';
 import { ChatListScreen } from '../screens/ChatListScreen';
