@@ -64,8 +64,16 @@
   .countdown { color: var(--accent); font-size: 11px; }
   .one-time { color: var(--danger); font-size: 11px; }
   .fail { color: var(--danger); font-size: 11px; }
-  .burned { color: var(--dim); font-style: italic; font-size: 13px; }
   .time { color: var(--dim); font-size: 10px; text-align: right; margin-top: 4px; }
+
+  /* decrypt animation + eternal peace */
+  .decrypting-label { color: var(--accent); font-size: 10px; letter-spacing: 2px; margin-bottom: 4px; animation: blink .35s steps(2) infinite; }
+  @keyframes blink { 50% { opacity: .25; } }
+  .plain-text.scrambling { color: var(--cipher); text-shadow: 0 0 8px rgba(74, 222, 128, .35); word-break: break-all; }
+  .bubble.dissolving { animation: dissolve .65s ease-in forwards; }
+  @keyframes dissolve { 60% { opacity: .35; filter: blur(1px); } 100% { opacity: 0; filter: blur(4px); transform: scale(.96); } }
+  .bubble.tombstone { background: transparent; border-style: dashed; border-color: var(--border); }
+  .tomb-text { color: var(--dim); font-style: italic; font-size: 13px; user-select: none; }
 
   .composer { display: flex; gap: 8px; padding: 10px 12px calc(10px + env(safe-area-inset-bottom)); border-top: 1px solid var(--border); align-items: flex-end; }
   .composer textarea { flex: 1; resize: none; max-height: 110px; }
@@ -106,7 +114,7 @@
     <div class="toggle-row">
       <div>
         <div>Auto Decode</div>
-        <div class="hint">Decrypt incoming messages automatically. Each still conceals after 10 s.</div>
+        <div class="hint">Decrypt incoming messages automatically. Every message can be read exactly once — then it departs forever.</div>
       </div>
       <input id="auto-decode" type="checkbox" style="width: 22px; height: 22px;" />
     </div>
@@ -148,8 +156,7 @@
   </header>
   <div id="msgs" class="msgs"></div>
   <div class="composer">
-    <button id="one-time" class="flame" title="One-time message">🔥</button>
-    <textarea id="draft" rows="1" placeholder="Encrypted message…"></textarea>
+    <textarea id="draft" rows="1" placeholder="Encrypted message… (readable once, then gone forever)"></textarea>
     <button id="send" class="send">➤</button>
   </div>
 </div>

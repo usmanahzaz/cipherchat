@@ -47,10 +47,8 @@ const state = {
   contacts: [],
   peer: null, // selected contact profile
   thread: [], // messages for selected peer
-  revealed: new Map(), // messageId -> { text, left, timer }
-  burned: new Set(),
+  revealed: new Map(), // messageId -> { text, phase, left, timer }
   failed: new Set(),
-  oneTime: false,
   ws: null,
 };
 
@@ -120,12 +118,24 @@ async function decryptFrom(peer, raw) {
   return result.plaintext;
 }
 
-// Vault: decoded plaintexts for re-display (never for one-time messages).
+// Vault: the sender's own plaintext, kept only until its single self-view.
 const vault = {
   get: (id) => store.getJson(`vault.${id}`, null),
   put: (id, text) => store.setJson(`vault.${id}`, text),
   del: (id) => localStorage.removeItem(store.userKey(`vault.${id}`)),
 };
+
+// Tombstones: where a message once stood. Persisted so departed messages
+// keep their place in the conversation forever.
+function loadTombs(peerId) {
+  return store.getJson(`tombs.${peerId}`, []);
+}
+function addTombstone(peerId, id, createdAt, mine) {
+  const tombs = loadTombs(peerId);
+  if (tombs.some((t) => t.id === id)) return;
+  tombs.push({ id, created_at: createdAt, mine });
+  store.setJson(`tombs.${peerId}`, tombs.slice(-500));
+}
 
 // ---------------------------------------------------------------------------
 // Screens
@@ -291,12 +301,6 @@ $('chat-back').onclick = () => {
   show('list');
 };
 
-$('one-time').onclick = () => {
-  state.oneTime = !state.oneTime;
-  $('one-time').classList.toggle('armed', state.oneTime);
-  $('draft').placeholder = state.oneTime ? 'One-time message…' : 'Encrypted message…';
-};
-
 $('send').onclick = sendDraft;
 $('draft').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) {
@@ -313,12 +317,10 @@ async function sendDraft() {
     const envelope = await encryptFor(state.peer, text);
     const { message } = await api('/messages', {
       method: 'POST',
-      body: { recipient_id: state.peer.id, ciphertext: envelope, nonce: 'v2', one_time: state.oneTime },
+      body: { recipient_id: state.peer.id, ciphertext: envelope, nonce: 'v2', one_time: true },
     });
-    if (!state.oneTime) vault.put(message.id, text);
-    state.oneTime = false;
-    $('one-time').classList.remove('armed');
-    $('draft').placeholder = 'Encrypted message…';
+    // Sender keeps their plaintext only until their own single self-view.
+    vault.put(message.id, text);
     state.thread.push(message);
     renderThread();
   } catch (e) {
@@ -329,10 +331,26 @@ async function sendDraft() {
 function renderThread() {
   const el = $('msgs');
   el.innerHTML = '';
-  for (const m of state.thread) {
-    el.appendChild(renderBubble(m));
+  if (!state.peer) return;
+  const tombs = loadTombs(state.peer.id);
+  const tombIds = new Set(tombs.map((t) => t.id));
+  const items = [
+    ...state.thread.filter((m) => !tombIds.has(m.id)).map((m) => ({ tomb: false, m, at: m.created_at })),
+    ...tombs.map((t) => ({ tomb: true, t, at: t.created_at })),
+  ].sort((a, b) => String(a.at).localeCompare(String(b.at)));
+  for (const item of items) {
+    el.appendChild(item.tomb ? renderTombstone(item.t) : renderBubble(item.m));
   }
   el.scrollTop = el.scrollHeight;
+}
+
+function renderTombstone(t) {
+  const div = document.createElement('div');
+  div.className = `bubble tombstone${t.mine ? ' mine' : ''}`;
+  div.innerHTML = '<div class="tomb-text">🕊 this message has departed — read once, gone for eternity</div>';
+  const time = new Date(t.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  div.insertAdjacentHTML('beforeend', `<div class="time">${time}</div>`);
+  return div;
 }
 
 function renderBubble(m) {
@@ -342,8 +360,10 @@ function renderBubble(m) {
   div.dataset.id = m.id;
 
   const revealed = state.revealed.get(m.id);
-  if (state.burned.has(m.id)) {
-    div.innerHTML = '<div class="burned">⌫ one-time message destroyed</div>';
+  if (revealed && revealed.phase === 'scramble') {
+    div.innerHTML = `
+      <div class="decrypting-label mono">▓▒░ DECRYPTING…</div>
+      <div class="plain-text scrambling mono">${escapeHtml(scrambleText(revealed.text, 0))}</div>`;
   } else if (revealed) {
     div.innerHTML = `
       <div class="plain-text">${escapeHtml(revealed.text)}</div>
@@ -351,11 +371,11 @@ function renderBubble(m) {
   } else {
     const preview = m.ciphertext.replace(/[^A-Za-z0-9]/g, '').slice(-96).match(/.{1,4}/g)?.join(' ') ?? '';
     const failNote = state.failed.has(m.id)
-      ? `<span class="fail">${mine ? 'not stored in this browser' : 'undecryptable (key consumed or invalid)'}</span>`
+      ? `<span class="fail">${mine ? 'not stored in this browser' : 'already read or invalid'}</span>`
       : '<button class="decode-btn mono">⟨ DECODE ⟩</button>';
     div.innerHTML = `
       <div class="cipher-text mono">${escapeHtml(preview)}</div>
-      <div class="meta">${m.one_time ? '<span class="one-time">🔥 one-time</span>' : '<span></span>'}${failNote}</div>`;
+      <div class="meta"><span class="one-time">🔥 read-once</span>${failNote}</div>`;
     div.querySelector('.decode-btn')?.addEventListener('click', () => decode(m));
   }
   const time = new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -364,37 +384,80 @@ function renderBubble(m) {
 }
 
 async function decode(m) {
+  if (state.revealed.has(m.id)) return;
   const mine = m.sender_id === state.profile.id;
-  let text = vault.get(m.id);
-  if (text === null && !mine) {
-    text = await decryptFrom(state.peer, m.ciphertext);
-    if (text !== null && !m.one_time) vault.put(m.id, text);
+  let text = null;
+  if (mine) {
+    text = vault.get(m.id); // sender's single self-view
+  } else {
+    text = await decryptFrom(state.peer, m.ciphertext); // consumes the key
   }
   if (text === null) {
     state.failed.add(m.id);
     renderThread();
     return;
   }
-  reveal(m, text);
+  startScramble(m, text);
 }
 
-function reveal(m, text) {
-  const entry = { text, left: VISIBLE_SECONDS, timer: null };
+const SCRAMBLE_CHARS = 'ABCDEF0123456789#$%&@?!<>[]{}=+*/\\';
+const SCRAMBLE_MS = 1400;
+
+function scrambleText(text, progress) {
+  const cut = Math.floor(progress * text.length);
+  let out = '';
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    out += i < cut || ch === ' ' || ch === '\n'
+      ? ch
+      : SCRAMBLE_CHARS[(Math.random() * SCRAMBLE_CHARS.length) | 0];
+  }
+  return out;
+}
+
+/** Hacking-style decryption: noise resolves into the message, then a
+ *  10-second read window, then the message departs — forever. */
+function startScramble(m, text) {
+  const entry = { text, phase: 'scramble', left: VISIBLE_SECONDS, timer: null };
   state.revealed.set(m.id, entry);
   renderThread();
-  entry.timer = setInterval(() => {
-    entry.left -= 1;
-    if (entry.left <= 0) {
-      clearInterval(entry.timer);
-      state.revealed.delete(m.id);
-      if (m.one_time && m.sender_id !== state.profile.id) {
-        state.burned.add(m.id);
-        vault.del(m.id);
-        api(`/messages/${m.id}`, { method: 'DELETE' }).catch(() => {});
-      }
+  const t0 = performance.now();
+  const anim = setInterval(() => {
+    const p = Math.min(1, (performance.now() - t0) / SCRAMBLE_MS);
+    const node = document.querySelector(`.bubble[data-id="${CSS.escape(m.id)}"] .plain-text`);
+    if (node) node.textContent = scrambleText(text, p);
+    if (p >= 1) {
+      clearInterval(anim);
+      entry.phase = 'shown';
+      renderThread();
+      entry.timer = setInterval(() => {
+        entry.left -= 1;
+        if (entry.left <= 0) {
+          clearInterval(entry.timer);
+          destroy(m);
+        } else {
+          renderThread();
+        }
+      }, 1000);
     }
+  }, 45);
+}
+
+/** Eternal peace: dissolve, leave a tombstone in place, erase everywhere. */
+function destroy(m) {
+  const mine = m.sender_id === state.profile.id;
+  const el = document.querySelector(`.bubble[data-id="${CSS.escape(m.id)}"]`);
+  el?.classList.add('dissolving');
+  setTimeout(() => {
+    state.revealed.delete(m.id);
+    vault.del(m.id);
+    addTombstone(state.peer.id, m.id, m.created_at, mine);
+    state.thread = state.thread.filter((x) => x.id !== m.id);
+    // The recipient's read erases the blob for everyone; a sender's
+    // self-view only tombstones their own copy (recipient can still read).
+    if (!mine) api(`/messages/${m.id}`, { method: 'DELETE' }).catch(() => {});
     renderThread();
-  }, 1000);
+  }, 680);
 }
 
 // ---------------------------------------------------------------------------
@@ -420,7 +483,16 @@ function connectWs() {
         if ($('auto-decode').checked) decode(msg);
       }
     } else if (event.type === 'message:deleted') {
+      // The peer read our message — it departs on our side too, leaving its
+      // tombstone in place.
       vault.del(event.id);
+      const known = state.thread.find((m) => m.id === event.id);
+      addTombstone(
+        event.peer_id,
+        event.id,
+        known?.created_at ?? new Date().toISOString(),
+        known ? known.sender_id === state.profile.id : true,
+      );
       state.thread = state.thread.filter((m) => m.id !== event.id);
       if (state.peer) renderThread();
     } else if (event.type === 'messages:delivered') {
