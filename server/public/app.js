@@ -401,7 +401,6 @@ async function decode(m) {
 }
 
 const SCRAMBLE_CHARS = 'ABCDEF0123456789#$%&@?!<>[]{}=+*/\\';
-const SCRAMBLE_MS = 1400;
 
 function scrambleText(text, progress) {
   const cut = Math.floor(progress * text.length);
@@ -415,18 +414,25 @@ function scrambleText(text, progress) {
   return out;
 }
 
-/** Hacking-style decryption: noise resolves into the message, then a
- *  10-second read window, then the message departs — forever. */
+/** Hacking-style decryption: noise resolves into the message — hesitant at
+ *  first, then accelerating as the "crack" lands — with live progress. After
+ *  the 10-second read window the message departs, forever. Longer messages
+ *  take proportionally longer to break. */
 function startScramble(m, text) {
   const entry = { text, phase: 'scramble', left: VISIBLE_SECONDS, timer: null };
   state.revealed.set(m.id, entry);
   renderThread();
+  const duration = Math.min(5200, 2600 + text.length * 45);
   const t0 = performance.now();
   const anim = setInterval(() => {
-    const p = Math.min(1, (performance.now() - t0) / SCRAMBLE_MS);
-    const node = document.querySelector(`.bubble[data-id="${CSS.escape(m.id)}"] .plain-text`);
+    const t = Math.min(1, (performance.now() - t0) / duration);
+    const p = Math.pow(t, 2.2); // slow, struggling start → sudden breakthrough
+    const bubble = document.querySelector(`.bubble[data-id="${CSS.escape(m.id)}"]`);
+    const node = bubble?.querySelector('.plain-text');
+    const label = bubble?.querySelector('.decrypting-label');
     if (node) node.textContent = scrambleText(text, p);
-    if (p >= 1) {
+    if (label) label.textContent = `▓▒░ DECRYPTING… ${String(Math.floor(p * 100)).padStart(2, '0')}%`;
+    if (t >= 1) {
       clearInterval(anim);
       entry.phase = 'shown';
       renderThread();
@@ -440,7 +446,7 @@ function startScramble(m, text) {
         }
       }, 1000);
     }
-  }, 45);
+  }, 55);
 }
 
 /** Eternal peace: dissolve, leave a tombstone in place, erase everywhere. */
