@@ -9,17 +9,22 @@
  */
 import { createServer } from 'node:http';
 import { networkInterfaces } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { attachRealtime } from './realtime.js';
 import { router } from './routes.js';
 
 const PORT = Number(process.env.PORT ?? 4000);
+const PUBLIC_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'public');
 
 const app = express();
 app.disable('x-powered-by');
 app.use(express.json({ limit: '256kb' }));
 
-app.get('/', (_req, res) => res.json({ name: 'cipherchat-server', ok: true }));
+app.get('/health', (_req, res) => res.json({ name: 'cipherchat-server', ok: true }));
+// The zero-install web client — same E2E protocol as the mobile app.
+app.use(express.static(PUBLIC_DIR));
 app.use(router);
 
 // eslint-disable-next-line no-unused-vars

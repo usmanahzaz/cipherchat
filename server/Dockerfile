@@ -10,6 +10,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
 COPY src ./src
+COPY public ./public
 
 ENV PORT=4000
 ENV CIPHERCHAT_DATA_DIR=/data
