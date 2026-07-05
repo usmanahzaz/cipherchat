@@ -1,7 +1,8 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomInt, randomUUID } from 'node:crypto';
 import { Router } from 'express';
 import { hashPassword, issueToken, requireAuth, verifyPassword } from './auth.js';
-import { db, messageRow, publicProfile } from './db.js';
+import { db, messageRow, publicProfile, selfProfile } from './db.js';
+import { emailConfigured, sendCode } from './email.js';
 import { sendContentFreePush } from './push.js';
 import { isOnline, sendTo } from './realtime.js';
 
@@ -10,9 +11,37 @@ export const router = Router();
 const now = () => new Date().toISOString();
 
 // ---------------------------------------------------------------------------
-// Auth — signup returns a session immediately: no email confirmation loop.
+// Email verification codes (6-digit, hashed, 15-minute expiry)
 // ---------------------------------------------------------------------------
-router.post('/auth/signup', (req, res) => {
+const CODE_TTL_MS = 15 * 60 * 1000;
+const hashCode = (code) => createHash('sha256').update(code).digest('hex');
+
+/** Issues a fresh code for a purpose, replacing any prior one, and emails it.
+ *  Returns the plaintext code ONLY when SMTP is unconfigured (dev mode). */
+async function issueEmailCode(user, kind) {
+  const code = String(randomInt(0, 1_000_000)).padStart(6, '0');
+  db.prepare('DELETE FROM email_tokens WHERE user_id = ? AND kind = ?').run(user.id, kind);
+  db.prepare(
+    'INSERT INTO email_tokens (id, user_id, kind, code_hash, expires_at) VALUES (?, ?, ?, ?, ?)',
+  ).run(randomUUID(), user.id, kind, hashCode(code), new Date(Date.now() + CODE_TTL_MS).toISOString());
+  await sendCode(user.email, kind, code);
+  return emailConfigured ? undefined : code;
+}
+
+/** Consumes a valid, unexpired code; returns true on success. */
+function consumeEmailCode(userId, kind, code) {
+  const row = db
+    .prepare('SELECT * FROM email_tokens WHERE user_id = ? AND kind = ?')
+    .get(userId, kind);
+  if (!row || row.code_hash !== hashCode(String(code ?? '')) || row.expires_at < now()) return false;
+  db.prepare('DELETE FROM email_tokens WHERE id = ?').run(row.id);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Auth — email + password, with email verification before first use.
+// ---------------------------------------------------------------------------
+router.post('/auth/signup', async (req, res) => {
   const { email, password } = req.body ?? {};
   if (typeof email !== 'string' || !email.includes('@')) {
     return res.status(400).json({ error: 'Valid email required.' });
@@ -22,7 +51,7 @@ router.post('/auth/signup', (req, res) => {
   }
   const id = randomUUID();
   try {
-    db.prepare('INSERT INTO users (id, email, password_hash) VALUES (?, ?, ?)').run(
+    db.prepare('INSERT INTO users (id, email, password_hash, email_verified) VALUES (?, ?, ?, 0)').run(
       id,
       email.trim(),
       hashPassword(password),
@@ -34,16 +63,67 @@ router.post('/auth/signup', (req, res) => {
     throw e;
   }
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
-  res.json({ token: issueToken(id), profile: publicProfile(user) });
+  const devCode = await issueEmailCode(user, 'verify');
+  // No session token until the email is verified.
+  res.json({ needsVerification: true, email: user.email, dev_code: devCode });
 });
 
-router.post('/auth/login', (req, res) => {
+router.post('/auth/verify', (req, res) => {
+  const { email, code } = req.body ?? {};
+  const user = db.prepare('SELECT * FROM users WHERE email = ?').get(String(email ?? '').trim());
+  if (!user) return res.status(404).json({ error: 'Account not found.' });
+  if (!consumeEmailCode(user.id, 'verify', code)) {
+    return res.status(400).json({ error: 'Invalid or expired code.' });
+  }
+  db.prepare('UPDATE users SET email_verified = 1 WHERE id = ?').run(user.id);
+  const fresh = db.prepare('SELECT * FROM users WHERE id = ?').get(user.id);
+  res.json({ token: issueToken(user.id), profile: selfProfile(fresh) });
+});
+
+router.post('/auth/resend', async (req, res) => {
+  const user = db.prepare('SELECT * FROM users WHERE email = ?').get(String(req.body?.email ?? '').trim());
+  // Do not reveal whether the account exists / is already verified.
+  let devCode;
+  if (user && !user.email_verified) devCode = await issueEmailCode(user, 'verify');
+  res.json({ ok: true, dev_code: devCode });
+});
+
+router.post('/auth/login', async (req, res) => {
   const { email, password } = req.body ?? {};
   const user = db.prepare('SELECT * FROM users WHERE email = ?').get(String(email ?? '').trim());
   if (!user || !verifyPassword(String(password ?? ''), user.password_hash)) {
     return res.status(401).json({ error: 'Invalid email or password.' });
   }
-  res.json({ token: issueToken(user.id), profile: publicProfile(user) });
+  if (!user.email_verified) {
+    const devCode = await issueEmailCode(user, 'verify');
+    return res.status(403).json({ needsVerification: true, email: user.email, dev_code: devCode });
+  }
+  res.json({ token: issueToken(user.id), profile: selfProfile(user) });
+});
+
+// Forgot / reset password (keys are unaffected — they live only on-device).
+router.post('/auth/forgot', async (req, res) => {
+  const user = db.prepare('SELECT * FROM users WHERE email = ?').get(String(req.body?.email ?? '').trim());
+  let devCode;
+  if (user) devCode = await issueEmailCode(user, 'reset'); // silent if no such account
+  res.json({ ok: true, dev_code: devCode });
+});
+
+router.post('/auth/reset', (req, res) => {
+  const { email, code, new_password } = req.body ?? {};
+  if (typeof new_password !== 'string' || new_password.length < 8) {
+    return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+  }
+  const user = db.prepare('SELECT * FROM users WHERE email = ?').get(String(email ?? '').trim());
+  if (!user || !consumeEmailCode(user.id, 'reset', code)) {
+    return res.status(400).json({ error: 'Invalid or expired code.' });
+  }
+  // A successful reset also proves control of the inbox → mark verified.
+  db.prepare('UPDATE users SET password_hash = ?, email_verified = 1 WHERE id = ?').run(
+    hashPassword(new_password),
+    user.id,
+  );
+  res.json({ ok: true });
 });
 
 // ---------------------------------------------------------------------------
@@ -52,7 +132,7 @@ router.post('/auth/login', (req, res) => {
 router.get('/me', requireAuth, (req, res) => {
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.userId);
   if (!user) return res.status(404).json({ error: 'Account not found.' });
-  res.json({ profile: publicProfile(user) });
+  res.json({ profile: selfProfile(user) });
 });
 
 // Publishes the PUBLIC key bundle (X25519 identity, Ed25519 signing key,
@@ -80,7 +160,7 @@ router.post('/me/keys', requireAuth, (req, res) => {
     throw e;
   }
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.userId);
-  res.json({ profile: publicProfile(user) });
+  res.json({ profile: selfProfile(user) });
 });
 
 router.post('/me/push-token', requireAuth, (req, res) => {
@@ -90,20 +170,18 @@ router.post('/me/push-token', requireAuth, (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// Contact discovery: exact match only — no browsing or enumeration.
+// Contact discovery: by Secure ID or public key only — exact match, no
+// browsing. Email is intentionally NOT searchable, so an email can never be
+// linked to an identity by other users.
 // ---------------------------------------------------------------------------
 router.post('/lookup', requireAuth, (req, res) => {
   const identifier = String(req.body?.identifier ?? '').trim();
   if (!identifier) return res.status(400).json({ error: 'identifier required.' });
   const user = db
-    .prepare(
-      `SELECT * FROM users
-       WHERE secure_id = ? OR email = ? COLLATE NOCASE OR public_key = ?
-       LIMIT 1`,
-    )
-    .get(identifier.toUpperCase(), identifier, identifier);
+    .prepare(`SELECT * FROM users WHERE secure_id = ? OR public_key = ? LIMIT 1`)
+    .get(identifier.toUpperCase(), identifier);
   if (!user || !user.public_key) {
-    return res.status(404).json({ error: 'No user found for that Secure ID, email, or public key.' });
+    return res.status(404).json({ error: 'No user found for that Secure ID or public key.' });
   }
   res.json({ profile: publicProfile(user) });
 });

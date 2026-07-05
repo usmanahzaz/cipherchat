@@ -156,6 +156,25 @@ Any other container host (Render, Fly.io, a VPS with Caddy) works the same way: 
 Dockerfile, persist `/data`, terminate TLS. The SQLite file is the entire server state — back it
 up by copying it. **HTTPS is mandatory beyond local testing** — see SECURITY.md.
 
+### Email (verification codes + password reset)
+
+Signup requires email verification and passwords can be reset by email. To send real emails, set
+these environment variables (Railway → your service → **Variables**):
+
+| Variable | Example | Notes |
+|---|---|---|
+| `SMTP_HOST` | `smtp.resend.com` | Any SMTP provider (Resend, SendGrid, Mailgun, Postmark, Gmail app-password…) |
+| `SMTP_PORT` | `587` | `465` for implicit TLS |
+| `SMTP_USER` | `resend` / your username | |
+| `SMTP_PASS` | your SMTP password / API key | store as a secret |
+| `SMTP_FROM` | `CipherChat <no-reply@yourdomain.com>` | must be an address the provider lets you send from |
+
+**Until SMTP is configured, the server runs in "dev email" mode:** verification and reset codes
+are shown on-screen (and logged to the server console) instead of emailed, so you can test the
+whole flow immediately. In this mode verification is a functional placeholder — **configure SMTP
+before relying on it in production.** Email addresses are private: they are used only for
+sign-in, verification, and reset, and are never shown to other users or returned by any lookup.
+
 ## Extending (the architecture is ready for it)
 
 - **Voice notes / images / media**: encrypt the file bytes with a random symmetric key

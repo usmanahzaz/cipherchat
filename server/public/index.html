@@ -103,12 +103,52 @@
   <div class="center">
     <div class="logo mono">⟨CC⟩</div>
     <h1>CipherChat</h1>
-    <div class="sub">Private by mathematics, not by promise. End-to-end encrypted with forward secrecy — the server only ever sees ciphertext.</div>
+    <div class="sub">Private by mathematics, not by promise. Your email is only for sign-in — other users never see it, only your Secure ID code.</div>
     <input id="auth-email" type="email" placeholder="email@example.com" autocomplete="email" />
     <input id="auth-password" type="password" placeholder="password (min 8 characters)" />
     <div id="auth-error" class="error"></div>
     <button id="auth-submit">Create account</button>
     <button id="auth-toggle" class="linkish">Have an account? Log in</button>
+    <button id="auth-forgot" class="linkish">Forgot password?</button>
+  </div>
+</div>
+
+<!-- VERIFY EMAIL -->
+<div id="screen-verify" class="screen">
+  <div class="center">
+    <div class="logo mono">⟨CC⟩</div>
+    <h1>Verify your email</h1>
+    <div class="sub">We sent a 6-digit code to <span id="verify-email" class="mono"></span>. Enter it to confirm this inbox is yours.</div>
+    <div id="dev-banner" class="card" style="display:none; border-color: var(--accent-dim);">
+      <div class="label">DEV MODE — EMAIL NOT CONFIGURED</div>
+      <div>Your code is <span id="dev-code" class="mono" style="color:var(--accent)"></span>. Configure SMTP on the server to send real emails.</div>
+    </div>
+    <input id="verify-code" inputmode="numeric" maxlength="6" placeholder="6-digit code" class="mono" />
+    <div id="verify-error" class="error"></div>
+    <button id="verify-submit">Verify</button>
+    <button id="verify-resend" class="linkish">Resend code</button>
+    <button id="verify-back" class="linkish">← Back</button>
+  </div>
+</div>
+
+<!-- FORGOT / RESET PASSWORD -->
+<div id="screen-forgot" class="screen">
+  <div class="center">
+    <div class="logo mono">⟨CC⟩</div>
+    <h1>Reset password</h1>
+    <div class="sub">Enter your email and we'll send a reset code. Note: this restores account access, not your keys — those live only in your browser.</div>
+    <div id="forgot-dev-banner" class="card" style="display:none; border-color: var(--accent-dim);">
+      <div class="label">DEV MODE — EMAIL NOT CONFIGURED</div>
+      <div>Your reset code is <span id="forgot-dev-code" class="mono" style="color:var(--accent)"></span>.</div>
+    </div>
+    <input id="forgot-email" type="email" placeholder="email@example.com" />
+    <div id="forgot-step2" style="display:none;">
+      <input id="forgot-code" inputmode="numeric" maxlength="6" placeholder="6-digit code" class="mono" />
+      <input id="forgot-password" type="password" placeholder="new password (min 8 characters)" />
+    </div>
+    <div id="forgot-error" class="error"></div>
+    <button id="forgot-submit">Send reset code</button>
+    <button id="forgot-back" class="linkish">← Back to login</button>
   </div>
 </div>
 
@@ -143,7 +183,7 @@
 <div id="screen-add" class="screen">
   <header><button id="add-back" class="ghost">‹ Back</button><div class="title mono">Add contact</div></header>
   <div class="center">
-    <input id="add-identifier" placeholder="CC-XXXX-XXXX-XXXX-XXXX or email" autocapitalize="off" />
+    <input id="add-identifier" placeholder="CC-XXXX-XXXX-XXXX-XXXX (their Secure ID code)" autocapitalize="off" />
     <input id="add-alias" placeholder="alias (optional)" />
     <div id="add-error" class="error"></div>
     <button id="add-submit">Add contact</button>

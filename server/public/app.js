@@ -147,12 +147,39 @@ function show(name) {
 
 // ---- auth ----
 let authMode = 'signup';
+let pendingEmail = '';
+
+/** Auth POST that returns { status, json } without throwing, so we can react
+ *  to 403-needs-verification etc. */
+async function authPost(path, body) {
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return { status: res.status, json: await res.json().catch(() => ({})) };
+}
+
 $('auth-toggle').onclick = () => {
   authMode = authMode === 'signup' ? 'login' : 'signup';
   $('auth-submit').textContent = authMode === 'signup' ? 'Create account' : 'Log in';
   $('auth-toggle').textContent =
     authMode === 'signup' ? 'Have an account? Log in' : 'New here? Create account';
 };
+
+function showVerify(email, devCode) {
+  pendingEmail = email;
+  $('verify-email').textContent = email;
+  $('verify-code').value = '';
+  $('verify-error').textContent = '';
+  if (devCode) {
+    $('dev-code').textContent = devCode;
+    $('dev-banner').style.display = '';
+  } else {
+    $('dev-banner').style.display = 'none';
+  }
+  show('verify');
+}
 
 $('auth-submit').onclick = async () => {
   const email = $('auth-email').value.trim();
@@ -164,20 +191,94 @@ $('auth-submit').onclick = async () => {
   }
   $('auth-submit').disabled = true;
   try {
-    const { token, profile } = await api(`/auth/${authMode}`, {
-      method: 'POST',
-      body: { email, password },
-    });
-    store.setToken(token);
-    state.profile = profile;
-    await ensureKeys();
-    await enterApp();
+    const { status, json } = await authPost(`/auth/${authMode}`, { email, password });
+    if (json.needsVerification) {
+      showVerify(email, json.dev_code); // signup, or login of an unverified account
+    } else if (status >= 400) {
+      $('auth-error').textContent = json.error || 'Something went wrong.';
+    } else {
+      await finishLogin(json.token, json.profile);
+    }
   } catch (e) {
     $('auth-error').textContent = e.message;
   } finally {
     $('auth-submit').disabled = false;
   }
 };
+
+$('verify-submit').onclick = async () => {
+  $('verify-error').textContent = '';
+  const { status, json } = await authPost('/auth/verify', {
+    email: pendingEmail,
+    code: $('verify-code').value.trim(),
+  });
+  if (status >= 400) {
+    $('verify-error').textContent = json.error || 'Invalid code.';
+    return;
+  }
+  await finishLogin(json.token, json.profile);
+};
+
+$('verify-resend').onclick = async () => {
+  const { json } = await authPost('/auth/resend', { email: pendingEmail });
+  if (json.dev_code) {
+    $('dev-code').textContent = json.dev_code;
+    $('dev-banner').style.display = '';
+  }
+  $('verify-error').textContent = 'A new code has been sent.';
+};
+
+$('verify-back').onclick = () => show('auth');
+
+// ---- forgot / reset password ----
+let forgotStep = 1;
+$('auth-forgot').onclick = () => {
+  forgotStep = 1;
+  $('forgot-step2').style.display = 'none';
+  $('forgot-dev-banner').style.display = 'none';
+  $('forgot-submit').textContent = 'Send reset code';
+  $('forgot-error').textContent = '';
+  show('forgot');
+};
+$('forgot-back').onclick = () => show('auth');
+
+$('forgot-submit').onclick = async () => {
+  $('forgot-error').textContent = '';
+  const email = $('forgot-email').value.trim();
+  if (forgotStep === 1) {
+    if (!email) return;
+    const { json } = await authPost('/auth/forgot', { email });
+    forgotStep = 2;
+    $('forgot-step2').style.display = '';
+    $('forgot-submit').textContent = 'Reset password';
+    if (json.dev_code) {
+      $('forgot-dev-code').textContent = json.dev_code;
+      $('forgot-dev-banner').style.display = '';
+    }
+    $('forgot-error').textContent = 'If that email has an account, a code was sent.';
+  } else {
+    const { status, json } = await authPost('/auth/reset', {
+      email,
+      code: $('forgot-code').value.trim(),
+      new_password: $('forgot-password').value,
+    });
+    if (status >= 400) {
+      $('forgot-error').textContent = json.error || 'Reset failed.';
+      return;
+    }
+    $('auth-error').textContent = 'Password reset. Please log in.';
+    authMode = 'login';
+    $('auth-submit').textContent = 'Log in';
+    show('auth');
+  }
+};
+
+async function finishLogin(token, profile) {
+  store.setToken(token);
+  state.profile = profile;
+  await ensureKeys();
+  await enterApp();
+}
 
 /** Generate identity in-browser and publish the public bundle (idempotent). */
 async function ensureKeys() {
@@ -226,9 +327,8 @@ async function refreshContacts() {
     card.className = 'request-card';
     card.innerHTML = `
       <div class="request-title mono">⟨!⟩ CONTACT REQUEST</div>
-      <div class="request-who">${escapeHtml(r.profile.email)}</div>
-      <div class="request-sub mono">${escapeHtml(r.profile.secure_id ?? '')}</div>
-      <div class="request-sub">wants to exchange end-to-end encrypted messages with you. Accept?</div>
+      <div class="request-who mono">${escapeHtml(r.profile.secure_id ?? 'Unknown ID')}</div>
+      <div class="request-sub">This code wants to exchange end-to-end encrypted messages with you. Accept?</div>
       <div class="request-actions">
         <button class="req-accept">Accept</button>
         <button class="req-decline ghost">Decline</button>
@@ -248,16 +348,17 @@ async function refreshContacts() {
   el.innerHTML = '';
   if (!contacts.length && !outgoing.length && !requests.length) {
     el.innerHTML =
-      '<div class="empty">No contacts yet.<br/>Tap ＋ Add and enter a Secure ID or email.<br/><br/>They must accept your request before you can message them.</div>';
+      '<div class="empty">No contacts yet.<br/>Tap ＋ Add and enter a Secure ID code.<br/><br/>They must accept your request before you can message them.</div>';
     return;
   }
   for (const c of contacts) {
+    const label = c.alias || c.profile.secure_id || '?';
     const row = document.createElement('div');
     row.className = 'contact-row';
     row.innerHTML = `
-      <div class="avatar">${escapeHtml((c.alias ?? c.profile.email)[0].toUpperCase())}</div>
+      <div class="avatar">${escapeHtml(label[0].toUpperCase())}</div>
       <div style="min-width:0">
-        <div class="contact-name">${escapeHtml(c.alias ?? c.profile.email)}</div>
+        <div class="contact-name">${escapeHtml(c.alias || 'Secure contact')}</div>
         <div class="contact-sub mono">${escapeHtml(c.profile.secure_id ?? '')}</div>
       </div>`;
     row.onclick = () => openChat(c);
@@ -269,7 +370,7 @@ async function refreshContacts() {
     row.innerHTML = `
       <div class="avatar">⏳</div>
       <div style="min-width:0">
-        <div class="contact-name">${escapeHtml(c.alias ?? c.profile.email)}</div>
+        <div class="contact-name mono">${escapeHtml(c.alias || c.profile.secure_id || '?')}</div>
         <div class="contact-sub">request sent — awaiting their acceptance</div>
       </div>`;
     el.appendChild(row);
@@ -322,7 +423,7 @@ $('add-submit').onclick = async () => {
 // ---- chat ----
 async function openChat(contact) {
   state.peer = contact.profile;
-  state.peerAlias = contact.alias ?? contact.profile.email;
+  state.peerAlias = contact.alias || contact.profile.secure_id;
   $('chat-name').textContent = state.peerAlias;
   $('chat-sub').textContent = `${contact.profile.secure_id} · E2E encrypted`;
   state.thread = [];
