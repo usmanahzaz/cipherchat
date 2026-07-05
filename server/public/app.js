@@ -205,21 +205,50 @@ async function ensureKeys() {
 
 async function enterApp() {
   $('my-id').textContent = state.profile.secure_id;
-  $('auto-decode').checked = store.getJson('autodecode', false);
   await refreshContacts();
   connectWs();
   show('list');
 }
 
-// ---- chat list ----
+// ---- chat list + contact requests ----
 async function refreshContacts() {
-  const { contacts } = await api('/contacts');
+  const [{ contacts, outgoing }, { requests }] = await Promise.all([
+    api('/contacts'),
+    api('/contact-requests'),
+  ]);
   state.contacts = contacts;
+
+  // Incoming requests: "do you want to accept encrypted messages from…?"
+  const reqEl = $('requests');
+  reqEl.innerHTML = '';
+  for (const r of requests) {
+    const card = document.createElement('div');
+    card.className = 'request-card';
+    card.innerHTML = `
+      <div class="request-title mono">⟨!⟩ CONTACT REQUEST</div>
+      <div class="request-who">${escapeHtml(r.profile.email)}</div>
+      <div class="request-sub mono">${escapeHtml(r.profile.secure_id ?? '')}</div>
+      <div class="request-sub">wants to exchange end-to-end encrypted messages with you. Accept?</div>
+      <div class="request-actions">
+        <button class="req-accept">Accept</button>
+        <button class="req-decline ghost">Decline</button>
+      </div>`;
+    card.querySelector('.req-accept').onclick = async () => {
+      await api(`/contact-requests/${r.id}/accept`, { method: 'POST' }).catch((e) => alert(e.message));
+      refreshContacts();
+    };
+    card.querySelector('.req-decline').onclick = async () => {
+      await api(`/contact-requests/${r.id}/decline`, { method: 'POST' }).catch(() => {});
+      refreshContacts();
+    };
+    reqEl.appendChild(card);
+  }
+
   const el = $('contacts');
   el.innerHTML = '';
-  if (!contacts.length) {
+  if (!contacts.length && !outgoing.length && !requests.length) {
     el.innerHTML =
-      '<div class="empty">No contacts yet.<br/>Tap ＋ Add and enter a Secure ID or email.</div>';
+      '<div class="empty">No contacts yet.<br/>Tap ＋ Add and enter a Secure ID or email.<br/><br/>They must accept your request before you can message them.</div>';
     return;
   }
   for (const c of contacts) {
@@ -232,6 +261,17 @@ async function refreshContacts() {
         <div class="contact-sub mono">${escapeHtml(c.profile.secure_id ?? '')}</div>
       </div>`;
     row.onclick = () => openChat(c);
+    el.appendChild(row);
+  }
+  for (const c of outgoing) {
+    const row = document.createElement('div');
+    row.className = 'contact-row pending-row';
+    row.innerHTML = `
+      <div class="avatar">⏳</div>
+      <div style="min-width:0">
+        <div class="contact-name">${escapeHtml(c.alias ?? c.profile.email)}</div>
+        <div class="contact-sub">request sent — awaiting their acceptance</div>
+      </div>`;
     el.appendChild(row);
   }
 }
@@ -259,7 +299,6 @@ $('btn-logout').onclick = () => {
   store.setToken(null);
   show('auth');
 };
-$('auto-decode').onchange = () => store.setJson('autodecode', $('auto-decode').checked);
 
 $('add-submit').onclick = async () => {
   $('add-error').textContent = '';
@@ -373,10 +412,12 @@ function renderBubble(m) {
     const failNote = state.failed.has(m.id)
       ? `<span class="fail">${mine ? 'not stored in this browser' : 'already read or invalid'}</span>`
       : '<button class="decode-btn mono">⟨ DECODE ⟩</button>';
+    const delBtn = mine ? '<button class="del-btn" title="Delete for both sides">✕ delete</button>' : '';
     div.innerHTML = `
       <div class="cipher-text mono">${escapeHtml(preview)}</div>
-      <div class="meta"><span class="one-time">🔥 read-once</span>${failNote}</div>`;
+      <div class="meta"><span class="one-time">🔥 read-once</span>${delBtn}${failNote}</div>`;
     div.querySelector('.decode-btn')?.addEventListener('click', () => decode(m));
+    div.querySelector('.del-btn')?.addEventListener('click', () => senderDelete(m));
   }
   const time = new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   div.insertAdjacentHTML('beforeend', `<div class="time">${time}${mine ? (m.delivered_at ? ' ✓✓' : ' ✓') : ''}</div>`);
@@ -449,6 +490,20 @@ function startScramble(m, text) {
   }, 55);
 }
 
+/** Sender recall: delete an unread sent message for both sides. */
+function senderDelete(m) {
+  const el = document.querySelector(`.bubble[data-id="${CSS.escape(m.id)}"]`);
+  el?.classList.add('dissolving');
+  setTimeout(() => {
+    vault.del(m.id);
+    addTombstone(state.peer.id, m.id, m.created_at, true);
+    state.thread = state.thread.filter((x) => x.id !== m.id);
+    // Server delete notifies the recipient, whose copy tombstones too.
+    api(`/messages/${m.id}`, { method: 'DELETE' }).catch(() => {});
+    renderThread();
+  }, 680);
+}
+
 /** Eternal peace: dissolve, leave a tombstone in place, erase everywhere. */
 function destroy(m) {
   const mine = m.sender_id === state.profile.id;
@@ -486,8 +541,15 @@ function connectWs() {
         state.thread.push(msg);
         renderThread();
         api('/messages/delivered', { method: 'POST', body: { peer_id: state.peer.id } }).catch(() => {});
-        if ($('auto-decode').checked) decode(msg);
       }
+    } else if (
+      event.type === 'contact:request' ||
+      event.type === 'contact:accepted' ||
+      event.type === 'contact:declined'
+    ) {
+      // Live handshake updates: a new request card appears, or a pending
+      // contact becomes messageable.
+      refreshContacts();
     } else if (event.type === 'message:deleted') {
       // The peer read our message — it departs on our side too, leaving its
       // tombstone in place.

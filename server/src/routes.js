@@ -109,37 +109,62 @@ router.post('/lookup', requireAuth, (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// Contacts
+// Contacts — request/accept handshake. Nobody can message you until you
+// explicitly accept their request.
 // ---------------------------------------------------------------------------
+const CONTACT_SELECT = `
+  SELECT c.id, c.owner_id, c.contact_id, c.alias, c.status,
+         u.id AS p_id, u.email AS p_email, u.secure_id AS p_secure_id,
+         u.public_key AS p_public_key, u.sign_public_key AS p_sign_public_key,
+         u.signed_prekey AS p_signed_prekey, u.prekey_signature AS p_prekey_signature`;
+
+function contactShape(r) {
+  return {
+    id: r.id,
+    owner_id: r.owner_id,
+    contact_id: r.contact_id,
+    alias: r.alias,
+    status: r.status,
+    profile: {
+      id: r.p_id,
+      email: r.p_email,
+      secure_id: r.p_secure_id,
+      public_key: r.p_public_key,
+      sign_public_key: r.p_sign_public_key,
+      signed_prekey: r.p_signed_prekey,
+      prekey_signature: r.p_prekey_signature,
+    },
+  };
+}
+
+function isAccepted(recipientId, senderId) {
+  return !!db
+    .prepare(`SELECT 1 FROM contacts WHERE owner_id = ? AND contact_id = ? AND status = 'accepted'`)
+    .get(recipientId, senderId);
+}
+
 router.get('/contacts', requireAuth, (req, res) => {
-  const rows = db
-    .prepare(
-      `SELECT c.id, c.owner_id, c.contact_id, c.alias,
-              u.id AS p_id, u.email AS p_email, u.secure_id AS p_secure_id,
-              u.public_key AS p_public_key, u.sign_public_key AS p_sign_public_key,
-              u.signed_prekey AS p_signed_prekey, u.prekey_signature AS p_prekey_signature
-       FROM contacts c JOIN users u ON u.id = c.contact_id
-       WHERE c.owner_id = ?
-       ORDER BY c.created_at ASC`,
-    )
-    .all(req.userId);
-  res.json({
-    contacts: rows.map((r) => ({
-      id: r.id,
-      owner_id: r.owner_id,
-      contact_id: r.contact_id,
-      alias: r.alias,
-      profile: {
-        id: r.p_id,
-        email: r.p_email,
-        secure_id: r.p_secure_id,
-        public_key: r.p_public_key,
-        sign_public_key: r.p_sign_public_key,
-        signed_prekey: r.p_signed_prekey,
-        prekey_signature: r.p_prekey_signature,
-      },
-    })),
-  });
+  const accepted = db
+    .prepare(`${CONTACT_SELECT} FROM contacts c JOIN users u ON u.id = c.contact_id
+              WHERE c.owner_id = ? AND c.status = 'accepted' ORDER BY c.created_at ASC`)
+    .all(req.userId)
+    .map(contactShape);
+  const outgoing = db
+    .prepare(`${CONTACT_SELECT} FROM contacts c JOIN users u ON u.id = c.contact_id
+              WHERE c.owner_id = ? AND c.status = 'pending' ORDER BY c.created_at ASC`)
+    .all(req.userId)
+    .map(contactShape);
+  res.json({ contacts: accepted, outgoing });
+});
+
+/** Incoming requests awaiting my decision. */
+router.get('/contact-requests', requireAuth, (req, res) => {
+  const requests = db
+    .prepare(`${CONTACT_SELECT} FROM contacts c JOIN users u ON u.id = c.owner_id
+              WHERE c.contact_id = ? AND c.status = 'pending' ORDER BY c.created_at ASC`)
+    .all(req.userId)
+    .map(contactShape);
+  res.json({ requests });
 });
 
 router.post('/contacts', requireAuth, (req, res) => {
@@ -147,10 +172,56 @@ router.post('/contacts', requireAuth, (req, res) => {
   const target = db.prepare('SELECT * FROM users WHERE id = ?').get(String(contact_id ?? ''));
   if (!target || !target.public_key) return res.status(404).json({ error: 'User not found.' });
   if (target.id === req.userId) return res.status(400).json({ error: 'That is your own ID.' });
+
+  const aliasVal = typeof alias === 'string' && alias ? alias : null;
+
+  // If they already asked US, adding them back completes the handshake.
+  const incoming = db
+    .prepare(`SELECT * FROM contacts WHERE owner_id = ? AND contact_id = ? AND status = 'pending'`)
+    .get(target.id, req.userId);
+  if (incoming) {
+    acceptRequest(incoming, req.userId, aliasVal);
+    return res.json({ ok: true, status: 'accepted' });
+  }
+
   db.prepare(
-    `INSERT INTO contacts (id, owner_id, contact_id, alias) VALUES (?, ?, ?, ?)
+    `INSERT INTO contacts (id, owner_id, contact_id, alias, status) VALUES (?, ?, ?, ?, 'pending')
      ON CONFLICT (owner_id, contact_id) DO UPDATE SET alias = excluded.alias`,
-  ).run(randomUUID(), req.userId, target.id, typeof alias === 'string' && alias ? alias : null);
+  ).run(randomUUID(), req.userId, target.id, aliasVal);
+
+  // Notify the target live: someone wants to exchange encrypted messages.
+  const me = db.prepare('SELECT * FROM users WHERE id = ?').get(req.userId);
+  sendTo(target.id, { type: 'contact:request', profile: publicProfile(me) });
+  res.json({ ok: true, status: 'pending' });
+});
+
+/** Marks their request accepted and creates my reciprocal accepted row. */
+function acceptRequest(requestRow, myId, myAlias) {
+  db.prepare(`UPDATE contacts SET status = 'accepted' WHERE id = ?`).run(requestRow.id);
+  db.prepare(
+    `INSERT INTO contacts (id, owner_id, contact_id, alias, status) VALUES (?, ?, ?, ?, 'accepted')
+     ON CONFLICT (owner_id, contact_id) DO UPDATE SET status = 'accepted'`,
+  ).run(randomUUID(), myId, requestRow.owner_id, myAlias);
+  const me = db.prepare('SELECT * FROM users WHERE id = ?').get(myId);
+  sendTo(requestRow.owner_id, { type: 'contact:accepted', profile: publicProfile(me) });
+}
+
+router.post('/contact-requests/:id/accept', requireAuth, (req, res) => {
+  const row = db.prepare('SELECT * FROM contacts WHERE id = ?').get(req.params.id);
+  if (!row || row.contact_id !== req.userId || row.status !== 'pending') {
+    return res.status(404).json({ error: 'Request not found.' });
+  }
+  acceptRequest(row, req.userId, typeof req.body?.alias === 'string' && req.body.alias ? req.body.alias : null);
+  res.json({ ok: true });
+});
+
+router.post('/contact-requests/:id/decline', requireAuth, (req, res) => {
+  const row = db.prepare('SELECT * FROM contacts WHERE id = ?').get(req.params.id);
+  if (!row || row.contact_id !== req.userId || row.status !== 'pending') {
+    return res.status(404).json({ error: 'Request not found.' });
+  }
+  db.prepare('DELETE FROM contacts WHERE id = ?').run(row.id);
+  sendTo(row.owner_id, { type: 'contact:declined', peer_id: req.userId });
   res.json({ ok: true });
 });
 
@@ -176,6 +247,9 @@ router.post('/messages', requireAuth, (req, res) => {
   }
   const recipient = db.prepare('SELECT * FROM users WHERE id = ?').get(String(recipient_id ?? ''));
   if (!recipient) return res.status(404).json({ error: 'Recipient not found.' });
+  if (!isAccepted(recipient.id, req.userId)) {
+    return res.status(403).json({ error: 'This contact has not accepted your request yet.' });
+  }
 
   const id = randomUUID();
   db.prepare(

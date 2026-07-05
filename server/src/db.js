@@ -40,6 +40,7 @@ db.exec(`
     owner_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     contact_id  TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     alias       TEXT,
+    status      TEXT NOT NULL DEFAULT 'pending',  -- request → accept handshake
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     UNIQUE (owner_id, contact_id)
   );
@@ -68,6 +69,10 @@ for (const col of ['sign_public_key', 'signed_prekey', 'prekey_signature']) {
     .prepare(`SELECT 1 FROM pragma_table_info('users') WHERE name = ?`)
     .get(col);
   if (!exists) db.exec(`ALTER TABLE users ADD COLUMN ${col} TEXT`);
+}
+// Pre-request-flow databases: existing contacts stay usable as accepted.
+if (!db.prepare(`SELECT 1 FROM pragma_table_info('contacts') WHERE name = 'status'`).get()) {
+  db.exec(`ALTER TABLE contacts ADD COLUMN status TEXT NOT NULL DEFAULT 'accepted'`);
 }
 
 /** Public profile shape sent to clients — never includes password/push token. */
